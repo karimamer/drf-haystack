@@ -7,10 +7,18 @@ Contents:
 .. toctree::
    :maxdepth: 2
 
-   basic_usage
-   advanced_usage
+   01_intro
+   02_autocomplete
+   03_geospatial
+   04_highlighting
+   05_more_like_this
+   06_term_boost
+   07_faceting
+   08_permissions
+   09_multiple_indexes
+   10_tips_n_tricks
+   apidoc/modules
 
-=====
 About
 =====
 Small library aiming to simplify using Haystack with Django REST Framework
@@ -50,7 +58,7 @@ You will also need to install python bindings for the search engine you'll use.
 Elasticsearch
 .............
 
-See haystack `Elasticsearch <https://django-haystack.readthedocs.org/en/v2.4.1/installing_search_engines.html#elasticsearch>`_
+See haystack `Elasticsearch <https://django-haystack.readthedocs.io/en/v2.4.1/installing_search_engines.html#elasticsearch>`_
 docs for details
 
 .. warning::
@@ -65,7 +73,7 @@ docs for details
 Solr
 ....
 
-See haystack `Solr <https://django-haystack.readthedocs.org/en/v2.4.1/installing_search_engines.html#solr>`_
+See haystack `Solr <https://django-haystack.readthedocs.io/en/v2.4.1/installing_search_engines.html#solr>`_
 docs for details.
 
 .. code-block:: none
@@ -75,7 +83,7 @@ docs for details.
 Whoosh
 ......
 
-See haystack `Whoosh <https://django-haystack.readthedocs.org/en/v2.4.1/installing_search_engines.html#whoosh>`_
+See haystack `Whoosh <https://django-haystack.readthedocs.io/en/v2.4.1/installing_search_engines.html#whoosh>`_
 docs for details.
 
 .. code-block:: none
@@ -85,7 +93,7 @@ docs for details.
 Xapian
 ......
 
-See haystack `Xapian <https://django-haystack.readthedocs.org/en/v2.4.1/installing_search_engines.html#xapian>`_
+See haystack `Xapian <https://django-haystack.readthedocs.io/en/v2.4.1/installing_search_engines.html#xapian>`_
 docs for details.
 
 
@@ -96,17 +104,28 @@ This library has mainly been written by `me <https://github.com/rhblind>`_ while
 at `Inonit <https://github.com/inonit>`_. I have also had some help from these amazing people!
 Thanks guys!
 
-    - `Jacob Rief <https://github.com/jrief>`_
-    - `Jannon Frank <https://github.com/jannon>`_
-    - `Michael Fladischer <https://github.com/fladi>`_ (Debian package)
-    - `Sam Peka <https://github.com/sampeka>`_
+    - See the full list of `contributors <https://github.com/inonit/drf-haystack/graphs/contributors>`_.
 
 Changelog
 =========
 
-v1.6.0
-------
-*Release date: Not yet released*
+v1.6.0rc3
+---------
+*Release date: 2016-06-29*
+
+    - Fixed :drf-issue:`61`. Introduction of custom serializers for serializing faceted objects contained a
+      breaking change.
+
+v1.6.0rc2
+---------
+*Release date: 2016-06-28*
+
+    - Restructured and updated documentation
+    - Added support for using a custom serializer when serializing faceted objects.
+
+v1.6.0rc1
+---------
+*Release date: 2016-06-24*
 
     .. note::
 
@@ -123,6 +142,14 @@ v1.6.0
         - All filters follow the same logic for building and applying filters and exclusions.
         - All filter classes use a ``QueryBuilder`` class for working out validation and building queries which are to be passed to the ``SearchQuerySet``.
         - Most filters does *not* inherit from ``HaystackFilter`` anymore (except ``HaystackAutocompleteFilter`` and ``HaystackHighlightFilter``) and will no longer do basic field filtering. Filters should be properly placed in the ``filter_backends`` class attribute in their respective order to be applied. This solves issues where inherited filters responds to query parameters they should ignore.
+    - HaystackFacetSerializer ``narrow_url`` now returns an absolute url.
+    - HaystackFacetSerializer now properly serializes ``MultiValueField`` and ``FacetMultiValueField`` items as a JSON Array.
+    - ``HaystackGenericAPIView.get_object()`` optional ``model`` query parameter now requires a ``app_label.model`` instead of just the ``model``.
+    - Extracted internal fields and serializer from the ``HaystackFacetSerializer`` in order to ease customization.
+    - ``HaystackFacetSerializer`` now supports all three `builtin <http://www.django-rest-framework.org/api-guide/pagination/#api-reference>`_ pagination classes, and a hook to support custom pagination classes.
+    - Extracted the ``more-like-this`` detail route and ``facets`` list route from the generic HaystackViewSet.
+        - Support for ``more-like-this`` is available as a :class:`drf_haystack.mixins.MoreLikeThisMixin` class.
+        - Support for ``facets`` is available as a :class:`drf_haystack.mixins.FacetMixin` class.
 
 v1.5.6
 ------
@@ -156,7 +183,7 @@ v1.5.2
 ------
 *Release date: 2015-08-23*
 
-    - Proper support for :ref:`multiple-search-indexes-label` (Github :drf-issue:`22`).
+    - Proper support for :ref:`multiple-indexes-label` (Github :drf-issue:`22`).
     - Experimental support for :ref:`term-boost-label` (This seems to have some issues upstreams,
       so unfortunately it does not really work as expected).
     - Support for negate in filters.
@@ -174,10 +201,10 @@ v1.5.0
 *Release date: 2015-06-29*
 
     - Added support for field lookups in queries, such as ``field__contains=foobar``.
-      Check out `Haystack docs <http://django-haystack.readthedocs.org/en/latest/searchqueryset_api.html?highlight=field%20lookup#field-lookups>`_
+      Check out `Haystack docs <https://django-haystack.readthedocs.io/en/latest/searchqueryset_api.html?highlight=field%20lookup#field-lookups>`_
       for details.
     - Added default ``permission_classes`` on ``HaystackGenericAPIView`` in order to avoid crash when
-      using global permission classes on REST Framework. See :ref:`permission-classes-label` for details.
+      using global permission classes on REST Framework. See :ref:`permissions-label` for details.
 
 v1.4
 ----
