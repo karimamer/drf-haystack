@@ -8,24 +8,24 @@ from __future__ import absolute_import, unicode_literals
 import json
 from datetime import datetime, timedelta
 
+import six
 from django.conf.urls import url, include
 from django.core.exceptions import ImproperlyConfigured
 from django.http import QueryDict
-from django.test import TestCase
-
+from django.test import TestCase, SimpleTestCase
 from haystack.query import SearchQuerySet
 
 from rest_framework import serializers
-from rest_framework.pagination import PageNumberPagination
+from rest_framework.pagination import PageNumberPagination, LimitOffsetPagination, CursorPagination
 from rest_framework.routers import DefaultRouter
 from rest_framework.test import APIRequestFactory, APITestCase
 
-from drf_haystack.generics import SQHighlighterMixin
 from drf_haystack.serializers import (
     HighlighterMixin, HaystackSerializer,
-    HaystackSerializerMixin, HaystackFacetSerializer
-)
+    HaystackSerializerMixin, HaystackFacetSerializer,
+    HaystackSerializerMeta)
 from drf_haystack.viewsets import HaystackViewSet
+from drf_haystack.mixins import MoreLikeThisMixin, FacetMixin
 
 from .mixins import WarningTestCaseMixin
 from .mockapp.models import MockPerson, MockPet
@@ -34,8 +34,24 @@ from .mockapp.search_indexes import MockPersonIndex, MockPetIndex
 factory = APIRequestFactory()
 
 
-class SearchPersonSerializer(HaystackSerializer):
-    more_like_this = serializers.HyperlinkedIdentityField(view_name="search-person-more-like-this", read_only=True)
+# More like this stuff
+class SearchPersonMLTSerializer(HaystackSerializer):
+    more_like_this = serializers.HyperlinkedIdentityField(view_name="search-person-mlt-more-like-this", read_only=True)
+
+    class Meta:
+        index_classes = [MockPersonIndex]
+        fields = ["firstname", "lastname", "full_name"]
+
+
+class SearchPersonMLTViewSet(MoreLikeThisMixin, HaystackViewSet):
+    serializer_class = SearchPersonMLTSerializer
+
+    class Meta:
+        index_models = [MockPerson]
+
+
+# Faceting stuff
+class SearchPersonFSerializer(HaystackSerializer):
 
     class Meta:
         index_classes = [MockPersonIndex]
@@ -43,7 +59,6 @@ class SearchPersonSerializer(HaystackSerializer):
 
 
 class SearchPersonFacetSerializer(HaystackFacetSerializer):
-
     serialize_objects = True
 
     class Meta:
@@ -61,22 +76,17 @@ class SearchPersonFacetSerializer(HaystackFacetSerializer):
         }
 
 
-class BasicPagination(PageNumberPagination):
-    page_size = 2
-    page_size_query_param = "page_size"
-
-
-class SearchPersonViewSet(HaystackViewSet):
-    serializer_class = SearchPersonSerializer
+class SearchPersonFacetViewSet(FacetMixin, HaystackViewSet):
+    serializer_class = SearchPersonFSerializer
     facet_serializer_class = SearchPersonFacetSerializer
-    pagination_class = BasicPagination
 
     class Meta:
         index_models = [MockPerson]
 
 
 router = DefaultRouter()
-router.register("search-person", viewset=SearchPersonViewSet, base_name="search-person")
+router.register("search-person-mlt", viewset=SearchPersonMLTViewSet, base_name="search-person-mlt")
+router.register("search-person-facet", viewset=SearchPersonFacetViewSet, base_name="search-person-facet")
 
 urlpatterns = [
     url(r"^", include(router.urls))
@@ -92,26 +102,6 @@ class HaystackSerializerTestCase(WarningTestCaseMixin, TestCase):
         MockPetIndex().reindex()
 
         class Serializer1(HaystackSerializer):
-            # This is not allowed. Serializer must implement a
-            # `Meta` class
-            pass
-
-        class Serializer2(HaystackSerializer):
-
-            class Meta:
-                # This is not allowed. The Meta class must implement
-                # a `index_classes` attribute
-                pass
-
-        class Serializer3(HaystackSerializer):
-
-            class Meta:
-                index_classes = [MockPersonIndex]
-                fields = ["some_field"]
-                exclude = ["another_field"]
-                # This is not allowed. Can't set both `fields` and `exclude`
-
-        class Serializer4(HaystackSerializer):
 
             integer_field = serializers.IntegerField()
             city = serializers.CharField()
@@ -126,13 +116,13 @@ class HaystackSerializerTestCase(WarningTestCaseMixin, TestCase):
             def get_city(self, obj):
                 return "Declared overriding field"
 
-        class Serializer5(HaystackSerializer):
+        class Serializer2(HaystackSerializer):
 
             class Meta:
                 index_classes = [MockPersonIndex]
                 exclude = ["firstname"]
 
-        class Serializer6(HaystackSerializer):
+        class Serializer3(HaystackSerializer):
 
             class Meta:
                 index_classes = [MockPersonIndex]
@@ -145,10 +135,7 @@ class HaystackSerializerTestCase(WarningTestCaseMixin, TestCase):
                 index_classes = [MockPetIndex]
 
         class ViewSet1(HaystackViewSet):
-            serializer_class = Serializer3
-
-        class ViewSet2(HaystackViewSet):
-            serializer_class = Serializer4
+            serializer_class = Serializer1
 
             class Meta:
                 index_models = [MockPerson]
@@ -156,44 +143,22 @@ class HaystackSerializerTestCase(WarningTestCaseMixin, TestCase):
         self.serializer1 = Serializer1
         self.serializer2 = Serializer2
         self.serializer3 = Serializer3
-        self.serializer4 = Serializer4
-        self.serializer5 = Serializer5
-        self.serializer6 = Serializer6
         self.serializer7 = Serializer7
-
         self.view1 = ViewSet1
-        self.view2 = ViewSet2
 
     def tearDown(self):
         MockPersonIndex().clear()
 
     def test_serializer_raise_without_meta_class(self):
         try:
-            self.serializer1()
-            self.fail("Did not fail when initialized serializer with no Meta class")
+            class Serializer(HaystackSerializer):
+                pass
+            self.fail("Did not fail when defining a Serializer without a Meta class")
         except ImproperlyConfigured as e:
-            self.assertEqual(str(e), "%s must implement a Meta class." % self.serializer1.__name__)
-
-    def test_serializer_raise_without_index_models(self):
-        try:
-            self.serializer2()
-            self.fail("Did not fail when initialized serializer with no 'index_classes' attribute")
-        except ImproperlyConfigured as e:
-            self.assertEqual(str(e), "You must set either the 'index_classes' or 'serializers' "
-                                     "attribute on the serializer Meta class.")
-
-    def test_serializer_raise_on_both_fields_and_exclude(self):
-        # Make sure we're getting an ImproperlyConfigured when trying to call a viewset
-        # which has both `fields` and `exclude` set.
-        request = factory.get(path="/", data="", content_type="application/json")
-        try:
-            self.view1.as_view(actions={"get": "list"})(request)
-            self.fail("Did not fail when serializer has both 'fields' and 'exclude' attributes")
-        except ImproperlyConfigured as e:
-            self.assertEqual(str(e), "Cannot set both `fields` and `exclude`.")
+            self.assertEqual(str(e), "%s must implement a Meta class or have the property _abstract" % "Serializer")
 
     def test_serializer_gets_default_instance(self):
-        serializer = self.serializer4(instance=None)
+        serializer = self.serializer1(instance=None)
         assert isinstance(serializer.instance, SearchQuerySet), self.fail("Did not get default instance "
                                                                           "of type SearchQuerySet")
 
@@ -201,7 +166,7 @@ class HaystackSerializerTestCase(WarningTestCaseMixin, TestCase):
         from rest_framework.fields import CharField, IntegerField
 
         obj = SearchQuerySet().filter(lastname="Foreman")[0]
-        serializer = self.serializer4(instance=obj)
+        serializer = self.serializer1(instance=obj)
         fields = serializer.get_fields()
         assert isinstance(fields, dict), self.fail("serializer.data is not a dict")
         assert isinstance(fields["integer_field"], IntegerField), self.fail("serializer 'integer_field' field is not a IntegerField instance")
@@ -214,7 +179,7 @@ class HaystackSerializerTestCase(WarningTestCaseMixin, TestCase):
         from rest_framework.fields import CharField
 
         obj = SearchQuerySet().filter(lastname="Foreman")[0]
-        serializer = self.serializer5(instance=obj)
+        serializer = self.serializer2(instance=obj)
         fields = serializer.get_fields()
         assert isinstance(fields, dict), self.fail("serializer.data is not a dict")
         assert isinstance(fields["text"], CharField), self.fail("serializer 'text' field is not a CharField instance")
@@ -226,7 +191,7 @@ class HaystackSerializerTestCase(WarningTestCaseMixin, TestCase):
         from rest_framework.fields import CharField
 
         obj = SearchQuerySet().filter(lastname="Foreman")[0]
-        serializer = self.serializer6(instance=obj)
+        serializer = self.serializer3(instance=obj)
         fields = serializer.get_fields()
         assert isinstance(fields, dict), self.fail("serializer.data is not a dict")
         assert isinstance(fields["text"], CharField), self.fail("serializer 'text' field is not a CharField instance")
@@ -349,11 +314,6 @@ class HaystackSerializerHighlighterMixinTestCase(WarningTestCaseMixin, TestCase)
     def setUp(self):
         MockPersonIndex().reindex()
 
-        class Serializer1(HaystackSerializer):
-            class Meta:
-                index_classes = [MockPersonIndex]
-                fields = ["firstname", "lastname", "full_name"]
-
         class Serializer2(HighlighterMixin, HaystackSerializer):
             highlighter_html_tag = "div"
             highlighter_css_class = "my-fancy-highlighter"
@@ -366,61 +326,42 @@ class HaystackSerializerHighlighterMixinTestCase(WarningTestCaseMixin, TestCase)
         class Serializer3(Serializer2):
             highlighter_class = None
 
-        class ViewSet1(SQHighlighterMixin, HaystackViewSet):
-            serializer_class = Serializer1
-
-        class ViewSet2(HaystackViewSet):
+        class ViewSet1(HaystackViewSet):
             serializer_class = Serializer2
 
-        class ViewSet3(HaystackViewSet):
+        class ViewSet2(HaystackViewSet):
             serializer_class = Serializer3
 
-        self.viewset1 = ViewSet1
-        self.viewset2 = ViewSet2
-        self.viewset3 = ViewSet3
+        self.view1 = ViewSet1
+        self.view2 = ViewSet2
 
     def tearDown(self):
         MockPersonIndex().clear()
 
-    def test_serializer_qs_highlighting(self):
-        request = factory.get(path="/", data={"firstname": "jeremy"}, content_type="application/json")
-        response = self.viewset1.as_view(actions={"get": "list"})(request)
-        response.render()
-        for result in json.loads(response.content.decode()):
-            self.assertTrue("highlighted" in result)
-            self.assertEqual(
-                result["highlighted"],
-                " ".join(("<em>Jeremy</em>", "%s\n" % result["lastname"]))
-            )
-
-    def test_serializer_qs_highlighter_gives_deprecation_warning(self):
-        request = factory.get(path="/", data={"firstname": "jeremy"}, content_type="application/json")
-        self.assertWarning(DeprecationWarning, self.viewset1.as_view(actions={"get": "list"}), request)
-
     def test_serializer_highlighting(self):
         request = factory.get(path="/", data={"firstname": "jeremy"}, content_type="application/json")
-        response = self.viewset2.as_view(actions={"get": "list"})(request)
+        response = self.view1.as_view(actions={"get": "list"})(request)
         response.render()
         for result in json.loads(response.content.decode()):
             self.assertTrue("highlighted" in result)
             self.assertEqual(
                 result["highlighted"],
                 " ".join(('<%(tag)s class="%(css_class)s">Jeremy</%(tag)s>' % {
-                    "tag": self.viewset2.serializer_class.highlighter_html_tag,
-                    "css_class": self.viewset2.serializer_class.highlighter_css_class
+                    "tag": self.view1.serializer_class.highlighter_html_tag,
+                    "css_class": self.view1.serializer_class.highlighter_css_class
                 }, "%s" % "is a nice chap!"))
             )
 
     def test_serializer_highlighter_raise_no_highlighter_class(self):
         request = factory.get(path="/", data={"firstname": "jeremy"}, content_type="application/json")
         try:
-            self.viewset3.as_view(actions={"get": "list"})(request)
+            self.view2.as_view(actions={"get": "list"})(request)
             self.fail("Did not raise ImproperlyConfigured error when called without a serializer_class")
         except ImproperlyConfigured as e:
             self.assertEqual(
                 str(e),
                 "%(cls)s is missing a highlighter_class. Define %(cls)s.highlighter_class, "
-                "or override %(cls)s.get_highlighter()." % {"cls": self.viewset3.serializer_class.__name__}
+                "or override %(cls)s.get_highlighter()." % {"cls": self.view2.serializer_class.__name__}
             )
 
 
@@ -437,18 +378,17 @@ class HaystackSerializerMoreLikeThisTestCase(APITestCase):
 
     def test_serializer_more_like_this_link(self):
         response = self.client.get(
-            path="/search-person/",
+            path="/search-person-mlt/",
             data={"firstname": "odysseus", "lastname": "cooley"},
             format="json"
         )
-        self.assertTrue("results" in response.data)
         self.assertEqual(
-            response.data["results"],
+            response.data,
             [{
                 "lastname": "Cooley",
                 "full_name": "Odysseus Cooley",
                 "firstname": "Odysseus",
-                "more_like_this": "http://testserver/search-person/18/more-like-this/"
+                "more_like_this": "http://testserver/search-person-mlt/18/more-like-this/"
             }]
         )
 
@@ -461,41 +401,20 @@ class HaystackFacetSerializerTestCase(TestCase):
     def setUp(self):
         MockPersonIndex().reindex()
         self.response = self.client.get(
-            path="/search-person/facets/",
+            path="/search-person-facet/facets/",
             data={},
             format=json
         )
 
-        class FacetSerializer(HaystackFacetSerializer):
-
-            serialize_objects = True
-
-            class Meta:
-                fields = ["firstname", "lastname"]
-                field_options = {
-                    "firstname": {},
-                    "lastname": {}
-                }
-
-        class Serializer(HaystackSerializer):
-
-            class Meta:
-                index_classes = [MockPersonIndex]
-                fields = ["firstname", "lastname", "full_name"]
-
-        class ViewSet(HaystackViewSet):
-
-            serializer_class = Serializer
-            facet_serializer_class = FacetSerializer
-            pagination_class = PageNumberPagination
-
-            class Meta:
-                index_models = [MockPerson]
-
-        self.view = ViewSet
-
     def tearDown(self):
         MockPersonIndex().clear()
+
+    def build_absolute_uri(self, location):
+        """
+        Builds an absolute URI using the test server's domain and the specified location.
+        """
+        location = location.lstrip("/")
+        return "http://testserver/{location}".format(location=location)
 
     @staticmethod
     def is_paginated_facet_response(response):
@@ -523,13 +442,19 @@ class HaystackFacetSerializerTestCase(TestCase):
         self.assertTrue(all([k in firstname for k in ("text", "count", "narrow_url")]))
         self.assertEqual(firstname["text"], "John")
         self.assertEqual(firstname["count"], 3)
-        self.assertEqual(firstname["narrow_url"], "/search-person/facets/?selected_facets=firstname_exact%3AJohn")
+        self.assertEqual(
+            firstname["narrow_url"],
+            self.build_absolute_uri("/search-person-facet/facets/?selected_facets=firstname_exact%3AJohn")
+        )
 
         lastname = fields["lastname"][0]
         self.assertTrue(all([k in lastname for k in ("text", "count", "narrow_url")]))
         self.assertEqual(lastname["text"], "Porter")
         self.assertEqual(lastname["count"], 2)
-        self.assertEqual(lastname["narrow_url"], "/search-person/facets/?selected_facets=lastname_exact%3APorter")
+        self.assertEqual(
+            lastname["narrow_url"],
+            self.build_absolute_uri("/search-person-facet/facets/?selected_facets=lastname_exact%3APorter")
+        )
 
     def test_serializer_facet_date_result(self):
         dates = self.response.data["dates"]
@@ -540,7 +465,10 @@ class HaystackFacetSerializerTestCase(TestCase):
         self.assertTrue(all([k in created for k in ("text", "count", "narrow_url")]))
         self.assertEqual(created["text"], "2015-05-01T00:00:00")
         self.assertEqual(created["count"], 100)
-        self.assertEqual(created["narrow_url"], "/search-person/facets/?selected_facets=created_exact%3A2015-05-01+00%3A00%3A00")
+        self.assertEqual(
+            created["narrow_url"],
+            self.build_absolute_uri("/search-person-facet/facets/?selected_facets=created_exact%3A2015-05-01+00%3A00%3A00")
+        )
 
     def test_serializer_facet_queries_result(self):
         # Not Implemented
@@ -548,7 +476,7 @@ class HaystackFacetSerializerTestCase(TestCase):
 
     def test_serializer_facet_narrow(self):
         response = self.client.get(
-            path="/search-person/facets/",
+            path="/search-person-facet/facets/",
             data=QueryDict("selected_facets=firstname_exact:John&selected_facets=lastname_exact:McClane"),
             format="json"
         )
@@ -559,65 +487,79 @@ class HaystackFacetSerializerTestCase(TestCase):
         self.assertEqual(len(response.data["fields"]["firstname"]), 1)
         self.assertEqual(response.data["fields"]["firstname"][0]["text"], "John")
         self.assertEqual(response.data["fields"]["firstname"][0]["count"], 1)
-        self.assertEqual(response.data["fields"]["firstname"][0]["narrow_url"], (
-            "/search-person/facets/?selected_facets=firstname_exact%3AJohn&selected_facets=lastname_exact%3AMcClane"
-        ))
+        self.assertEqual(
+            response.data["fields"]["firstname"][0]["narrow_url"],
+            self.build_absolute_uri("/search-person-facet/facets/?selected_facets=firstname_exact%3AJohn"
+                                    "&selected_facets=lastname_exact%3AMcClane")
+        )
 
         self.assertEqual(len(response.data["fields"]["lastname"]), 1)
         self.assertEqual(response.data["fields"]["lastname"][0]["text"], "McClane")
         self.assertEqual(response.data["fields"]["lastname"][0]["count"], 1)
-        self.assertEqual(response.data["fields"]["lastname"][0]["narrow_url"], (
-            "/search-person/facets/?selected_facets=firstname_exact%3AJohn&selected_facets=lastname_exact%3AMcClane"
-        ))
+        self.assertEqual(
+            response.data["fields"]["lastname"][0]["narrow_url"],
+            self.build_absolute_uri("/search-person-facet/facets/?selected_facets=firstname_exact%3AJohn"
+                                    "&selected_facets=lastname_exact%3AMcClane")
+        )
 
         self.assertTrue("created" in response.data["dates"])
         self.assertEqual(len(response.data["dates"]), 1)
         self.assertEqual(response.data["dates"]["created"][0]["text"], "2015-05-01T00:00:00")
         self.assertEqual(response.data["dates"]["created"][0]["count"], 1)
-        self.assertEqual(response.data["dates"]["created"][0]["narrow_url"], (
-            "/search-person/facets/?selected_facets=created_exact%3A2015-05-01+00%3A00%3A00"
-            "&selected_facets=firstname_exact%3AJohn&selected_facets=lastname_exact%3AMcClane"
-        ))
+        self.assertEqual(
+            response.data["dates"]["created"][0]["narrow_url"],
+            self.build_absolute_uri("/search-person-facet/facets/?selected_facets=created_exact%3A2015-05-01+00%3A00%3A00"
+                                    "&selected_facets=firstname_exact%3AJohn&selected_facets=lastname_exact%3AMcClane"
+                                    )
+        )
 
     def test_serializer_facet_include_objects(self):
         self.assertContains(self.response, "objects", count=1)
 
-    def test_serializer_facet_include_paginated_objects(self):
-        self.assertTrue(self.is_paginated_facet_response(self.response))
-        self.assertEqual(self.response.data["objects"]["next"], "http://testserver/search-person/facets/?page=2")
-        self.assertEqual(self.response.data["objects"]["previous"], None)
-        self.assertEqual(len(self.response.data["objects"]["results"]), 2)  # `page_size`
+    # def test_serializer_facet_include_paginated_objects(self):
+    #     self.assertTrue(self.is_paginated_facet_response(self.response))
+    #     self.assertEqual(self.response.data["objects"]["next"], "http://testserver/search-person-facet/facets/?page=2")
+    #     self.assertEqual(self.response.data["objects"]["previous"], None)
+    #     self.assertEqual(len(self.response.data["objects"]["results"]), 2)  # `page_size`
+    #
+    # def test_serializer_faceted_and_paginated_response(self):
+    #     response = self.client.get(
+    #         path="/search-person-facet/facets/",
+    #         data=QueryDict("selected_facets=firstname_exact:John"),
+    #         format="json"
+    #     )
+    #     self.assertTrue(self.is_paginated_facet_response(response))
+    #     self.assertEqual(len(response.data["objects"]["results"]), 2)
+    #     self.assertEqual(response.data["objects"]["count"], 3)
+    #     self.assertEqual(response.data["objects"]["previous"], None)
+    #     self.assertEqual(response.data["objects"]["next"],
+    #                      "http://testserver/search-person-facet/facets/?page=2&selected_facets=firstname_exact%3AJohn")
+    #
+    #     response = self.client.get(
+    #         path="/search-person-facet/facets/",
+    #         data=QueryDict("page=2&selected_facets=firstname_exact:John")
+    #     )
+    #     self.assertTrue(self.is_paginated_facet_response(response))
+    #     self.assertEqual(len(response.data["objects"]["results"]), 1)
+    #     self.assertEqual(response.data["objects"]["count"], 3)
+    #     self.assertEqual(response.data["objects"]["previous"],
+    #                      "http://testserver/search-person-facet/facets/?selected_facets=firstname_exact%3AJohn")
+    #     self.assertEqual(response.data["objects"]["next"], None)
+    #
+    #     # Make sure that `page_query_param` is not included in the `narrow_url`.
+    #     # It will make the pagination fail because when we narrow the queryset, the
+    #     # pagination will have to be re-calculated.
+    #     fields = response.data["fields"]
+    #     firstname = fields["firstname"][0]
+    #     self.assertFalse("page=2" in firstname["narrow_url"])
 
-    def test_serializer_faceted_and_paginated_response(self):
-        response = self.client.get(
-            path="/search-person/facets/",
-            data=QueryDict("selected_facets=firstname_exact:John"),
-            format="json"
-        )
-        self.assertTrue(self.is_paginated_facet_response(response))
-        self.assertEqual(len(response.data["objects"]["results"]), 2)
-        self.assertEqual(response.data["objects"]["count"], 3)
-        self.assertEqual(response.data["objects"]["previous"], None)
-        self.assertEqual(response.data["objects"]["next"],
-                         "http://testserver/search-person/facets/?page=2&selected_facets=firstname_exact%3AJohn")
-
-        response = self.client.get(
-            path="/search-person/facets/",
-            data=QueryDict("page=2&selected_facets=firstname_exact:John")
-        )
-        self.assertTrue(self.is_paginated_facet_response(response))
-        self.assertEqual(len(response.data["objects"]["results"]), 1)
-        self.assertEqual(response.data["objects"]["count"], 3)
-        self.assertEqual(response.data["objects"]["previous"],
-                         "http://testserver/search-person/facets/?selected_facets=firstname_exact%3AJohn")
-        self.assertEqual(response.data["objects"]["next"], None)
-
-        # Make sure that `page_query_param` is not included in the `narrow_url`.
-        # It will make the pagination fail because when we narrow the queryset, the
-        # pagination will have to be re-calculated.
-        fields = response.data["fields"]
-        firstname = fields["firstname"][0]
-        self.assertFalse("page=2" in firstname["narrow_url"])
+    def test_serializer_raise_without_meta_class(self):
+        try:
+            class FacetSerializer(HaystackFacetSerializer):
+                pass
+            self.fail("Did not fail when defining a Serializer without a Meta class")
+        except ImproperlyConfigured as e:
+            self.assertEqual(str(e), "%s must implement a Meta class or have the property _abstract" % "FacetSerializer")
 
 
 class HaystackSerializerMixinTestCase(WarningTestCaseMixin, TestCase):
@@ -656,7 +598,7 @@ class HaystackSerializerMixinTestCase(WarningTestCaseMixin, TestCase):
                 "firstname": "Abel",
                 "lastname": "Foreman",
                 "created": "2015-05-19T10:48:08.686000Z",
-                "updated": "2015-05-19T10:48:08.686000Z"
+                "updated": "2016-04-24T16:02:59.378000Z"
             }]
         )
 
@@ -710,3 +652,46 @@ class HaystackMultiSerializerTestCase(WarningTestCaseMixin, TestCase):
                 "description": "Zane is a nice chap!"
             }]
         )
+
+
+class TestHaystackSerializerMeta(SimpleTestCase):
+
+    def test_abstract_not_inherited(self):
+        class Base(six.with_metaclass(HaystackSerializerMeta, serializers.Serializer)):
+            _abstract = True
+
+        def create_subclass():
+            class Sub(HaystackSerializer):
+                pass
+
+        self.assertRaises(ImproperlyConfigured, create_subclass)
+
+
+class TestMeta(SimpleTestCase):
+
+    def test_inheritance(self):
+        """
+        Tests that Meta fields are correctly overriden by subclasses.
+        """
+        class Serializer(HaystackSerializer):
+            class Meta:
+                fields = ('overriden_fields',)
+
+        self.assertEqual(Serializer.Meta.fields, ('overriden_fields',))
+
+    def test_default_attrs(self):
+        class Serializer(HaystackSerializer):
+            class Meta:
+                fields = ('overriden_fields',)
+
+        self.assertEqual(Serializer.Meta.exclude, tuple())
+
+    def test_raises_if_fields_and_exclude_defined(self):
+        def create_subclass():
+            class Serializer(HaystackSerializer):
+                class Meta:
+                    fields = ('include_field',)
+                    exclude = ('exclude_field',)
+            return Serializer
+
+        self.assertRaises(ImproperlyConfigured, create_subclass)

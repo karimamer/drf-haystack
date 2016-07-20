@@ -7,6 +7,9 @@ import warnings
 from itertools import chain
 from datetime import datetime
 
+from rest_framework.pagination import _get_count
+from rest_framework.serializers import SerializerMetaclass
+
 try:
     from collections import OrderedDict
 except ImportError:
@@ -23,17 +26,71 @@ from rest_framework import serializers
 from rest_framework.fields import empty
 from rest_framework.utils.field_mapping import ClassLookupDict, get_field_kwargs
 
-from .fields import (
+from drf_haystack.fields import (
     HaystackBooleanField, HaystackCharField, HaystackDateField, HaystackDateTimeField,
-    HaystackDecimalField, HaystackFloatField, HaystackIntegerField
+    HaystackDecimalField, HaystackFloatField, HaystackIntegerField, HaystackMultiValueField,
+    FacetDictField, FacetListField
 )
 
 
-class HaystackSerializer(serializers.Serializer):
+class Meta(type):
+    """
+    Template for the HaystackSerializerMeta.Meta class.
+    """
+
+    fields = tuple()
+    exclude = tuple()
+    search_fields = tuple()
+    index_classes = tuple()
+    serializers = tuple()
+    ignore_fields = tuple()
+    field_aliases = {}
+    field_options = {}
+    index_aliases = {}
+
+    def __new__(mcs, name, bases, attrs):
+        cls = super(Meta, mcs).__new__(mcs, str(name), bases, attrs)
+
+        if cls.fields and cls.exclude:
+            raise ImproperlyConfigured("%s cannot define both 'fields' and 'exclude'." % name)
+
+        return cls
+
+    def __setattr__(cls, key, value):
+        raise AttributeError("Meta class is immutable.")
+
+    def __delattr__(cls, key, value):
+        raise AttributeError("Meta class is immutable.")
+
+
+class HaystackSerializerMeta(SerializerMetaclass):
+
+    """
+    Metaclass for the HaystackSerializer that ensures that all declared subclasses implemented a Meta.
+    """
+
+    def __new__(mcs, name, bases, attrs):
+        attrs.setdefault("_abstract", False)
+
+        cls = super(HaystackSerializerMeta, mcs).__new__(mcs, str(name), bases, attrs)
+
+        if getattr(cls, "Meta", None):
+            cls.Meta = Meta("Meta", (Meta,), dict(cls.Meta.__dict__))
+
+        elif not cls._abstract:
+            raise ImproperlyConfigured("%s must implement a Meta class or have the property _abstract" % name)
+
+        return cls
+
+
+class HaystackSerializer(six.with_metaclass(HaystackSerializerMeta, serializers.Serializer)):
     """
     A `HaystackSerializer` which populates fields based on
     which models that are available in the SearchQueryset.
     """
+
+    _abstract = True
+
     _field_mapping = ClassLookupDict({
         haystack_fields.BooleanField: HaystackBooleanField,
         haystack_fields.CharField: HaystackCharField,
@@ -48,23 +105,20 @@ class HaystackSerializer(serializers.Serializer):
         haystack_fields.FacetDecimalField: HaystackDecimalField,
         haystack_fields.FacetFloatField: HaystackFloatField,
         haystack_fields.FacetIntegerField: HaystackIntegerField,
-        haystack_fields.FacetMultiValueField: HaystackCharField,
+        haystack_fields.FacetMultiValueField: HaystackMultiValueField,
         haystack_fields.FloatField: HaystackFloatField,
         haystack_fields.IntegerField: HaystackIntegerField,
         haystack_fields.LocationField: HaystackCharField,
-        haystack_fields.MultiValueField: HaystackCharField,
+        haystack_fields.MultiValueField: HaystackMultiValueField,
         haystack_fields.NgramField: HaystackCharField,
     })
 
     def __init__(self, instance=None, data=empty, **kwargs):
         super(HaystackSerializer, self).__init__(instance, data, **kwargs)
 
-        try:
-            if not hasattr(self.Meta, "index_classes") and not hasattr(self.Meta, "serializers"):
-                raise ImproperlyConfigured("You must set either the 'index_classes' or 'serializers' "
-                                           "attribute on the serializer Meta class.")
-        except AttributeError:
-            raise ImproperlyConfigured("%s must implement a Meta class." % self.__class__.__name__)
+        if not self.Meta.index_classes and not self.Meta.serializers:
+            raise ImproperlyConfigured("You must set either the 'index_classes' or 'serializers' "
+                                       "attribute on the serializer Meta class.")
 
         if not self.instance:
             self.instance = EmptySearchQuerySet()
@@ -76,8 +130,8 @@ class HaystackSerializer(serializers.Serializer):
         to instantiate a REST Framework serializer field.
         """
         kwargs = {}
-        if field.model_attr in model._meta.get_all_field_names():
-            model_field = model._meta.get_field_by_name(field.model_attr)[0]
+        if field.model_attr in model._meta.get_fields():
+            model_field = model._meta.get_field(field.model_attr)[0]
             kwargs = get_field_kwargs(field.model_attr, model_field)
 
             # Remove stuff we don't care about!
@@ -104,7 +158,7 @@ class HaystackSerializer(serializers.Serializer):
         may optionally specify custom aliases via an 'index_aliases' attribute on the Meta class
         """
         cls_name = index_cls.__name__
-        aliases = getattr(self.Meta, "index_aliases", {})
+        aliases = self.Meta.index_aliases
         return aliases.get(cls_name, cls_name.split('.')[-1])
 
     def get_fields(self):
@@ -112,14 +166,10 @@ class HaystackSerializer(serializers.Serializer):
         Get the required fields for serializing the result.
         """
 
-        fields = getattr(self.Meta, "fields", [])
-        exclude = getattr(self.Meta, "exclude", [])
-
-        if fields and exclude:
-            raise ImproperlyConfigured("Cannot set both `fields` and `exclude`.")
-
-        ignore_fields = getattr(self.Meta, "ignore_fields", [])
-        indices = getattr(self.Meta, "index_classes")
+        fields = self.Meta.fields
+        exclude = self.Meta.exclude
+        ignore_fields = self.Meta.ignore_fields
+        indices = self.Meta.index_classes
 
         declared_fields = copy.deepcopy(self._declared_fields)
         prefix_field_names = len(indices) > 1
@@ -172,7 +222,7 @@ class HaystackSerializer(serializers.Serializer):
         not be valid for all results. Do not render the fields which don't belong
         to the search result.
         """
-        if getattr(self.Meta, "serializers", None):
+        if self.Meta.serializers:
             ret = self.multi_serializer_representation(instance)
         else:
             ret = super(HaystackSerializer, self).to_representation(instance)
@@ -205,129 +255,139 @@ class HaystackSerializer(serializers.Serializer):
         return serializer_class(context=self._context).to_representation(instance)
 
 
-class HaystackFacetSerializer(serializers.Serializer):
+class FacetFieldSerializer(serializers.Serializer):
+    """
+    Responsible for serializing a faceted result.
+    """
+
+    text = serializers.SerializerMethodField()
+    count = serializers.SerializerMethodField()
+    narrow_url = serializers.SerializerMethodField()
+
+    def __init__(self, *args, **kwargs):
+        self._parent_field = None
+        super(FacetFieldSerializer, self).__init__(*args, **kwargs)
+
+    @property
+    def parent_field(self):
+        return self._parent_field
+
+    @parent_field.setter
+    def parent_field(self, value):
+        self._parent_field = value
+
+    def get_paginate_by_param(self):
+        """
+        Returns the ``paginate_by_param`` for the (root) view paginator class.
+        This is needed in order to remove the query parameter from faceted
+        narrow urls.
+
+        If using a custom pagination class, this class attribute needs to
+        be set manually.
+        """
+        if hasattr(self.root, "paginate_by_param") and self.root.paginate_by_param:
+            return self.root.paginate_by_param
+
+        pagination_class = self.context["view"].pagination_class
+
+        # PageNumberPagination
+        if hasattr(pagination_class, "page_query_param"):
+            return pagination_class.page_query_param
+
+        # LimitOffsetPagination
+        elif hasattr(pagination_class, "offset_query_param"):
+            return pagination_class.offset_query_param
+
+        # CursorPagination
+        elif hasattr(pagination_class, "cursor_query_param"):
+            return pagination_class.cursor_query_param
+
+        else:
+            raise AttributeError(
+                "%(root_cls)s is missing a `paginate_by_param` attribute. "
+                "Define a %(root_cls)s.paginate_by_param or override "
+                "%(cls)s.get_paginate_by_param()." % {
+                    "root_cls": self.root.__class__.__name__,
+                    "cls": self.__class__.__name__
+                })
+
+    def get_text(self, instance):
+        """
+        Haystack facets are returned as a two-tuple (value, count).
+        The text field should contain the faceted value.
+        """
+        instance = instance[0]
+        if isinstance(instance, (six.text_type, six.string_types)):
+            return serializers.CharField(read_only=True).to_representation(instance)
+        elif isinstance(instance, datetime):
+            return serializers.DateTimeField(read_only=True).to_representation(instance)
+        return instance
+
+    def get_count(self, instance):
+        """
+        Haystack facets are returned as a two-tuple (value, count).
+        The count field should contain the faceted count.
+        """
+        instance = instance[1]
+        return serializers.IntegerField(read_only=True).to_representation(instance)
+
+    def get_narrow_url(self, instance):
+        """
+        Return a link suitable for narrowing on the current item.
+
+        Since we don't have any means of getting the ``view name`` from here,
+        we can only return relative paths.
+        """
+        text = instance[0]
+        request = self.context["request"]
+        query_params = request.GET.copy()
+
+        # Never keep the page query parameter in narrowing urls.
+        # It will raise a NotFound exception when trying to paginate a narrowed queryset.
+        page_query_param = self.get_paginate_by_param()
+        if page_query_param in query_params:
+            del query_params[page_query_param]
+
+        selected_facets = set(query_params.pop("selected_facets", []))
+        selected_facets.add("%(field)s_exact:%(text)s" % {"field": self.parent_field, "text": text})
+        query_params.setlist("selected_facets", sorted(selected_facets))
+
+        path = "%(path)s?%(query)s" % {"path": request.path_info, "query": query_params.urlencode()}
+        url = request.build_absolute_uri(path)
+        return serializers.Hyperlink(url, name="narrow-url")
+
+    def to_representation(self, field, instance):
+        """
+        Set the ``parent_field`` property equal to the current field on the serializer class,
+        so that each field can query it to see what kind of attribute they are processing.
+        """
+        self.parent_field = field
+        return super(FacetFieldSerializer, self).to_representation(instance)
+
+
+class HaystackFacetSerializer(six.with_metaclass(HaystackSerializerMeta, serializers.Serializer)):
     """
     The ``HaystackFacetSerializer`` is used to serialize the ``facet_counts()``
     dictionary results on a ``SearchQuerySet`` instance.
     """
 
-    # Setting the ``serialize_objects`` to True,
-    # will serialize the faceted queryset using the ``view.serializer_class``.
+    _abstract = True
     serialize_objects = False
-
-    def __init__(self, *args, **kwargs):
-        super(HaystackFacetSerializer, self).__init__(*args, **kwargs)
-
-        class FacetDictField(serializers.DictField):
-            """
-            A special DictField which passes the key attribute down to the children's
-            ``to_representation()`` in order to let the serializer know what field they're
-            currently processing.
-            """
-            def to_representation(self, value):
-                return dict([
-                    (six.text_type(key), self.child.to_representation(key, val))
-                    for key, val in value.items()
-                ])
-
-        class FacetListField(serializers.ListField):
-            """
-            The ``FacetListField`` just pass along the key derived from
-            ``FacetDictField``.
-            """
-            def to_representation(self, key, data):
-                return [self.child.to_representation(key, item) for item in data]
-
-        class FacetFieldSerializer(serializers.Serializer):
-            """
-            Responsible for serializing each faceted result.
-            """
-
-            text = serializers.SerializerMethodField()
-            count = serializers.SerializerMethodField()
-            narrow_url = serializers.SerializerMethodField()
-
-            def __init__(self, *args, **kwargs):
-                self._parent_field = None
-                super(FacetFieldSerializer, self).__init__(*args, **kwargs)
-
-            @property
-            def parent_field(self):
-                return self._parent_field
-
-            @parent_field.setter
-            def parent_field(self, value):
-                self._parent_field = value
-
-            def get_text(self, instance):
-                """
-                Haystack facets are returned as a two-tuple (value, count).
-                The text field should contain the faceted value.
-                """
-                instance = instance[0]
-                if isinstance(instance, (six.text_type, six.string_types)):
-                    return serializers.CharField(read_only=True).to_representation(instance)
-                elif isinstance(instance, datetime):
-                    return serializers.DateTimeField(read_only=True).to_representation(instance)
-                return instance
-
-            def get_count(self, instance):
-                """
-                Haystack facets are returned as a two-tuple (value, count).
-                The count field should contain the faceted count.
-                """
-                instance = instance[1]
-                return serializers.IntegerField(read_only=True).to_representation(instance)
-
-            def get_narrow_url(self, instance):
-                """
-                Return a link suitable for narrowing on the current item.
-
-                Since we don't have any means of getting the ``view name`` from here,
-                we can only return relative paths.
-                """
-                text = instance[0]
-                query_params = self.context["request"].GET.copy()
-
-                # Never keep the page query parameter in narrowing urls.
-                # It will raise a NotFound exception when trying to paginate
-                # a narrowed queryset.
-                page_query_param = self.context["view"].paginator.page_query_param
-                if page_query_param in query_params:
-                    del query_params[page_query_param]
-
-                selected_facets = set(query_params.pop("selected_facets", []))
-                selected_facets.add("%(field)s_exact:%(text)s" % {"field": self.parent_field, "text": text})
-                query_params.setlist("selected_facets", sorted(selected_facets))
-
-                return serializers.Hyperlink("%(path)s?%(query)s" % {
-                    "path": self.context["request"].path_info,
-                    "query": query_params.urlencode()
-                }, name="narrow-url")
-
-            def to_representation(self, field, instance):
-                """
-                Set the ``parent_field`` property equal to the current field on the serializer class,
-                so that each field can query it to see what kind of attribute they are processing.
-                """
-                self.parent_field = field
-                return super(FacetFieldSerializer, self).to_representation(instance)
-
-        self.FacetDictField = FacetDictField
-        self.FacetListField = FacetListField
-        self.FacetFieldSerializer = FacetFieldSerializer
+    paginate_by_param = None
+    facet_dict_field_class = FacetDictField
+    facet_list_field_class = FacetListField
+    facet_field_serializer_class = FacetFieldSerializer
 
     def get_fields(self):
         """
         This returns a dictionary containing the top most fields,
         ``dates``, ``fields`` and ``queries``.
         """
-
         field_mapping = OrderedDict()
         for field, data in self.instance.items():
             field_mapping.update(
-                {field: self.FacetDictField(
-                    child=self.FacetListField(child=self.FacetFieldSerializer(data)), required=False)}
+                {field: self.facet_dict_field_class(
+                    child=self.facet_list_field_class(child=self.facet_field_serializer_class(data)), required=False)}
             )
 
         if self.serialize_objects is True:
@@ -342,11 +402,11 @@ class HaystackFacetSerializer(serializers.Serializer):
         view = self.context["view"]
         queryset = self.context["objects"]
 
-        page = getattr(view.paginator, "page", None)
+        page = view.paginate_queryset(queryset)
         if page is not None:
-            serializer = view.get_serializer(page, many=True)
+            serializer = view.get_facet_objects_serializer(page, many=True)
             return OrderedDict([
-                ("count", view.paginator.page.paginator.count),
+                ("count", _get_count(queryset)),
                 ("next", view.paginator.get_next_link()),
                 ("previous", view.paginator.get_previous_link()),
                 ("results", serializer.data)

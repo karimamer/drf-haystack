@@ -6,11 +6,10 @@
 from __future__ import absolute_import, unicode_literals
 
 import json
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from unittest2 import skipIf
 
-from django.core.exceptions import ImproperlyConfigured
 from django.test import TestCase
 
 from rest_framework import status
@@ -21,8 +20,10 @@ from drf_haystack.viewsets import HaystackViewSet
 from drf_haystack.serializers import HaystackSerializer, HaystackFacetSerializer
 from drf_haystack.filters import (
     HaystackAutocompleteFilter, HaystackBoostFilter,
-    HaystackGEOSpatialFilter, HaystackHighlightFilter,
-    HaystackFacetFilter)
+    HaystackFacetFilter, HaystackFilter,
+    HaystackGEOSpatialFilter, HaystackHighlightFilter
+)
+from drf_haystack.mixins import FacetMixin
 
 from . import geospatial_support
 from .mixins import WarningTestCaseMixin
@@ -44,7 +45,8 @@ class HaystackFilterTestCase(TestCase):
 
             class Meta:
                 index_classes = [MockPersonIndex]
-                fields = ["text", "firstname", "lastname", "full_name", "autocomplete"]
+                fields = ["text", "firstname", "lastname",
+                          "full_name", "birthdate", "autocomplete"]
                 field_aliases = {
                     "q": "autocomplete",
                     "name": "full_name"
@@ -77,6 +79,9 @@ class HaystackFilterTestCase(TestCase):
 
     def tearDown(self):
         MockPersonIndex().clear()
+
+    def test_filter_view_has_default_filter(self):
+        self.assertEqual(self.view1.filter_backends, [HaystackFilter])
 
     def test_filter_no_query_parameters(self):
         request = factory.get(path="/", data="", content_type="application/json")
@@ -155,15 +160,6 @@ class HaystackFilterTestCase(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 3)
 
-    def test_filter_raise_on_serializer_without_meta_class(self):
-        # Make sure we're getting an ImproperlyConfigured when trying to filter on a viewset
-        # with a serializer without `Meta` class.
-        request = factory.get(path="/", data={"lastname": "Hood"}, content_type="application/json")
-        self.assertRaises(
-            ImproperlyConfigured,
-            self.view3.as_view(actions={"get": "list"}), request
-        )
-
     def test_filter_unicode_characters(self):
         request = factory.get(path="/", data={"firstname": "åsmund", "lastname": "sørensen"},
                               content_type="application/json")
@@ -187,6 +183,16 @@ class HaystackFilterTestCase(TestCase):
         response = self.view1.as_view(actions={"get": "list"})(request)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 2)
+
+    def test_filter_gt_date_field(self):
+        request = factory.get(path="/", data={"birthdate__gt": "1980-01-01"}, content_type="application/json")
+        response = self.view1.as_view(actions={"get": "list"})(request)
+        self.assertEqual(len(response.data), MockPerson.objects.filter(birthdate__gt=date(1980, 1, 1)).count())
+
+    def test_filter_lt_date_field(self):
+        request = factory.get(path="/", data={"birthdate__lt": "1980-01-01"}, content_type="application/json")
+        response = self.view1.as_view(actions={"get": "list"})(request)
+        self.assertEqual(len(response.data), MockPerson.objects.filter(birthdate__lt=date(1980, 1, 1)).count())
 
 
 class HaystackAutocompleteFilterTestCase(TestCase):
@@ -311,7 +317,7 @@ class HaystackHighlightFilterTestCase(TestCase):
     def tearDown(self):
         MockPersonIndex().clear()
 
-    def test_filter_sq_highlighter_filter(self):
+    def test_filter_highlighter_filter(self):
         request = factory.get(path="/", data={"firstname": "jeremy"}, content_type="application/json")
         response = self.view.as_view(actions={"get": "list"})(request)
         response.render()
@@ -373,12 +379,33 @@ class HaystackBoostFilterTestCase(TestCase):
     #     self.assertEqual(data[0]["firstname"], "Walker")
     #     self.assertEqual(data[1]["firstname"], "Bruno")
 
-    def test_filter_boost_invalid_params(self):
+    def test_filter_boost_valid_params(self):
+        request = factory.get(path="/", data={"boost": "bruno,1.2"}, content_type="application/json")
+        response = self.view.as_view(actions={"get": "list"})(request)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_filter_boost_invalid_non_numeric(self):
         request = factory.get(path="/", data={"boost": "bruno,i am not numeric!"}, content_type="application/json")
-        self.assertRaises(
-            ValueError,
-            self.view.as_view(actions={"get": "list"}), request
-        )
+        try:
+            self.view.as_view(actions={"get": "list"})(request)
+            self.fail("Did not raise ValueError when called with a non-numeric boost value.")
+        except ValueError as e:
+            self.assertEqual(
+                str(e),
+                "Cannot convert boost to float value. Make sure to provide a numerical boost value."
+            )
+
+    def test_filter_boost_invalid_malformed_query_params(self):
+        request = factory.get(path="/", data={"boost": "bruno"}, content_type="application/json")
+        try:
+            self.view.as_view(actions={"get": "list"})(request)
+            self.fail("Did not raise ValueError when called with a malformed query parameters.")
+        except ValueError as e:
+            self.assertEqual(
+                str(e),
+                "Cannot convert the '%s' query parameter to a valid boost filter."
+                % HaystackBoostFilter.query_param
+            )
 
 
 class HaystackFacetFilterTestCase(WarningTestCaseMixin, TestCase):
@@ -410,11 +437,11 @@ class HaystackFacetFilterTestCase(WarningTestCaseMixin, TestCase):
                     }
                 }
 
-        class ViewSet1(HaystackViewSet):
+        class ViewSet1(FacetMixin, HaystackViewSet):
             index_models = [MockPerson]
             facet_serializer_class = FacetSerializer1
 
-        class ViewSet2(HaystackViewSet):
+        class ViewSet2(FacetMixin, HaystackViewSet):
             index_models = [MockPerson]
             facet_serializer_class = FacetSerializer2
 
@@ -423,6 +450,9 @@ class HaystackFacetFilterTestCase(WarningTestCaseMixin, TestCase):
 
     def tearDown(self):
         MockPersonIndex().clear()
+
+    def test_filter_view_has_default_facet_filter(self):
+        self.assertEqual(self.view1.facet_filter_backends, [HaystackFacetFilter])
 
     def test_filter_facet_no_field_options(self):
         request = factory.get("/", data={}, content_type="application/json")

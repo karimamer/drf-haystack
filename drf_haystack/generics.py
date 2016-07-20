@@ -2,18 +2,15 @@
 
 from __future__ import absolute_import, unicode_literals
 
-import warnings
-
 from django.contrib.contenttypes.models import ContentType
-from django.db.models.loading import get_model
 from django.http import Http404
+from django.utils import six
 
 from haystack.backends import SQ
 from haystack.query import SearchQuerySet
 from rest_framework.generics import GenericAPIView
-from rest_framework.permissions import AllowAny
 
-from .filters import HaystackFilter, HaystackFacetFilter
+from drf_haystack.filters import HaystackFilter
 
 
 class HaystackGenericAPIView(GenericAPIView):
@@ -40,9 +37,6 @@ class HaystackGenericAPIView(GenericAPIView):
 
     filter_backends = [HaystackFilter]
 
-    facet_filter_backends = [HaystackFacetFilter]
-    facet_serializer_class = None
-
     def get_queryset(self, index_models=[]):
         """
         Get the list of items for this view.
@@ -68,20 +62,21 @@ class HaystackGenericAPIView(GenericAPIView):
         SearchIndex.
 
         In cases where the view has multiple ``index_models``, add a ``model`` query
-        parameter containing a single model name to the request in order to override which model
-        to include in the SearchQuerySet.
+        parameter containing a single `app.label.model` name to the request in order
+        to override which model to include in the SearchQuerySet.
 
         Example:
-            /api/v1/search/42/?model=person
+            /api/v1/search/42/?model=myapp.person
         """
         queryset = self.get_queryset()
-        if "model" in self.request.GET:
+        if "model" in self.request.query_params:
             try:
-                ctype = ContentType.objects.get(model=self.request.GET["model"].lower())
-                queryset = self.get_queryset(index_models=[get_model(ctype.app_label, ctype.model)])
-            except ContentType.DoesNotExist:
+                app_label, model = map(six.text_type.lower, self.request.query_params["model"].split(".", 1))
+                ctype = ContentType.objects.get(app_label=app_label, model=model)
+                queryset = self.get_queryset(index_models=[ctype.model_class()])
+            except (ValueError, ContentType.DoesNotExist):
                 raise Http404("Could not find any models matching '%s'. Make sure to use a valid "
-                              "model name for the 'model' query parameter." % self.request.GET["model"])
+                              "'app_label.model' name for the 'model' query parameter." % self.request.query_params["model"])
 
         lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
         if lookup_url_kwarg not in self.kwargs:
@@ -104,72 +99,4 @@ class HaystackGenericAPIView(GenericAPIView):
         if self.load_all:
             queryset = queryset.load_all()
 
-        return queryset
-
-    def filter_facet_queryset(self, queryset):
-        """
-        Given a search queryset, filter it with whichever facet filter backends
-        in use.
-        """
-        for backend in list(self.facet_filter_backends):
-            queryset = backend().filter_queryset(self.request, queryset, self)
-
-        if self.load_all:
-            queryset = queryset.load_all()
-
-        return queryset
-
-    def get_facet_serializer(self, *args, **kwargs):
-        """
-        Return the facet serializer instance that should be used for
-        serializing faceted output.
-        """
-        assert "objects" in kwargs, "`objects` is a required argument to `get_facet_serializer()`"
-
-        facet_serializer_class = self.get_facet_serializer_class()
-        kwargs["context"] = self.get_serializer_context()
-        kwargs["context"].update({
-            "objects": kwargs.pop("objects")
-        })
-        return facet_serializer_class(*args, **kwargs)
-
-    def get_facet_serializer_class(self):
-        """
-        Return the class to use for serializing facets.
-        Defaults to using ``self.facet_serializer_class``.
-        """
-        if self.facet_serializer_class is None:
-            raise AttributeError(
-                "%(cls)s should either include a `facet_serializer_class` attribute, "
-                "or override %(cls)s.get_facet_serializer_class() method." %
-                {"cls": self.__class__.__name__}
-            )
-        return self.facet_serializer_class
-
-
-class SQHighlighterMixin(object):
-    """
-    DEPRECATED! Remove in v1.6.0.
-    Please use the HaystackHighlightFilter instead.
-
-    This mixin adds support for highlighting on the SearchQuerySet
-    level (the fast one).
-    Note that you need to use a backend which supports hightlighting in order
-    to use this.
-
-    This will add a `hightlighted` entry to your response, encapsulating the
-    highlighted words in an `<em>highlighted results</em>` block.
-    """
-    def filter_queryset(self, queryset):
-        warnings.warn(
-            "The SQHighlighterMixin is marked for deprecation, and has been re-written "
-            "as a filter backend. Please remove SQHighlighterMixin from the "
-            "%(cls)s, and add HaystackHighlightFilter to %(cls)s.filter_backends." %
-            {"cls": self.__class__.__name__},
-            DeprecationWarning
-        )
-
-        queryset = super(SQHighlighterMixin, self).filter_queryset(queryset)
-        if self.request.GET and isinstance(queryset, SearchQuerySet):
-            queryset = queryset.highlight()
         return queryset
